@@ -1,6 +1,6 @@
 # How to use?
 
-1. Download executable from https://github.com/nilotpaul/gospur/releases
+1. Download executable from https://github.com/nilotpaul/selfmailmerge/releases
 2. Create a folder and put the downloaded executable inside.
 3. Place your CSV or XLSX file in this folder.
 4. Create a `.env` file with your configuration:
