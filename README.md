@@ -1,6 +1,6 @@
 # How to use?
 
-1. Download executable from https://github.com/nilotpaul/selfmailmerge/releases/download/v0.1.0/selfmailmerge
+1. Download executable from https://github.com/nilotpaul/selfmailmerge/releases/latest/download/selfmailmerge
 2. Create a folder and put the downloaded executable inside.
 3. Place your CSV or XLSX file in this folder.
 4. Create a `.env` file with your configuration:
@@ -29,6 +29,7 @@ This is your email {{.Email}}
 Best,
 Paul
 "
+ATTACHMENT=
 ```
 
 - `CSV_FILE_PATH` → path to your CSV/XLSX file.

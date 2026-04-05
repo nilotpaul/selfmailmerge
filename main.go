@@ -3,12 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
-	"net/smtp"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,6 +24,7 @@ const (
 )
 
 var templ = template.New("")
+var password string
 
 func main() {
 	godotenv.Load()
@@ -33,7 +34,9 @@ func main() {
 		pass      = flag.String("password", "", "microsoft account password")
 		templPath = flag.String("template", "template.html", "email template path")
 		csvPath   = flag.String("csv", "", "email template path")
-		body      = os.Getenv("BODY")
+
+		attachment = os.Getenv("ATTACHMENT")
+		body       = os.Getenv("BODY")
 	)
 	flag.Parse()
 
@@ -59,6 +62,7 @@ func main() {
 	if len(*csvPath) == 0 {
 		log.Fatal("no csv file path provided")
 	}
+	password = *pass
 
 	if len(*templPath) > 0 {
 		_, err := templ.ParseFiles(*templPath)
@@ -79,17 +83,18 @@ func main() {
 		log.Fatal(err)
 	}
 
-	data, err := mapDataToAny(recs)
+	data, headers, err := mapDataToAny(recs)
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println("\navailable: ", strings.Join(headers, ", "))
 
 	_, err = templ.New("subject").Parse(os.Getenv("SUBJECT"))
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	emailsToBeSent := []*Email{}
+	emailsToBeSent := []*Message{}
 	for _, row := range data {
 		buf := new(bytes.Buffer)
 		subBuf := new(bytes.Buffer)
@@ -106,111 +111,58 @@ func main() {
 
 		to := []string{}
 		for _, value := range row {
-			vStr := value.(string)
-			if len(to) == 0 && IsValidEmail(vStr) {
+			vStr, ok := value.(string)
+			if !ok {
+				continue
+			}
+			if len(to) == 0 && isValidEmail(vStr) {
 				to = append(to, vStr)
 				break
 			}
 		}
 
-		cc := parseEmails(os.Getenv("CC"))
-		bcc := parseEmails(os.Getenv("BCC"))
-		emailsToBeSent = append(emailsToBeSent, &Email{
-			From:    *from,
-			To:      to,
-			Subject: subBuf.String(),
-			Body:    strings.ReplaceAll(strings.TrimSpace(buf.String()), "\n", "<br/>"),
-			CC:      cc,
-			BCC:     bcc,
+		cc := parseStringSlice(os.Getenv("CC"))
+		bcc := parseStringSlice(os.Getenv("BCC"))
+		emailsToBeSent = append(emailsToBeSent, &Message{
+			From:            *from,
+			To:              to,
+			Subject:         subBuf.String(),
+			Body:            strings.ReplaceAll(strings.TrimSpace(buf.String()), "\n", "<br/>"),
+			CC:              cc,
+			BCC:             bcc,
+			AttachmentPaths: parseStringSlice(attachment),
 		})
 	}
 
-	auth := LoginAuth(*from, *pass)
-	for _, email := range emailsToBeSent {
+	errs := map[string]string{}
+	for _, msg := range emailsToBeSent {
+		mail, err := NewMail(msg)
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		if *isTest {
-			fmt.Println("\n" + string(buildEmail(*email)))
+			msg.PrintDebug()
 			return
 		} else {
-			allRecepients := []string{}
-			allRecepients = append(allRecepients, email.To...)
-			allRecepients = append(allRecepients, email.BCC...)
-			allRecepients = append(allRecepients, email.CC...)
-
-			err = smtp.SendMail(SmtpHost+":"+SmtpPort, auth, *from, allRecepients, buildEmail(*email))
-			if err != nil {
-				log.Fatal(err)
+			if err := mail.Send(); err != nil {
+				for _, e := range msg.To {
+					errs[e] = err.Error()
+				}
 			}
 		}
 	}
-}
-
-type loginAuth struct {
-	username, password string
-}
-
-// LoginAuth is used for smtp login auth
-func LoginAuth(username, password string) smtp.Auth {
-	return &loginAuth{
-		username: username,
-		password: password,
+	if len(errs) == 0 {
+		fmt.Printf("%d emails sent succesfully!", len(emailsToBeSent))
+	} else {
+		res := map[string]any{"count": len(errs), "failed": errs}
+		file, _ := os.Create("emails.json")
+		defer file.Close()
+		enc := json.NewEncoder(file)
+		enc.SetIndent("", "  ")
+		enc.Encode(res)
+		fmt.Println("failed to send some/all emails, check emails.json file")
 	}
-}
-
-func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
-	return "LOGIN", []byte(a.username), nil
-}
-
-func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
-	if more {
-		switch string(fromServer) {
-		case "Username:":
-			return []byte(a.username), nil
-		case "Password:":
-			return []byte(a.password), nil
-		default:
-			return nil, errors.New("Unknown from server")
-		}
-	}
-	return nil, nil
-}
-
-type Email struct {
-	From    string
-	To      []string
-	CC      []string
-	BCC     []string
-	Subject string
-	Body    string // HTML body
-}
-
-func buildEmail(e Email) []byte {
-	var msg bytes.Buffer
-
-	// Required headers
-	msg.WriteString(fmt.Sprintf("From: %s\r\n", e.From))
-	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(e.To, ",")))
-
-	// Optional CC
-	if len(e.CC) > 0 {
-		msg.WriteString(fmt.Sprintf("CC: %s\r\n", strings.Join(e.CC, ",")))
-	}
-
-	// Optional Subject
-	if e.Subject != "" {
-		msg.WriteString(fmt.Sprintf("Subject: %s\r\n", e.Subject))
-	}
-
-	// MIME headers (important for HTML)
-	msg.WriteString("MIME-Version: 1.0\r\n")
-	msg.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
-
-	// End headers
-	msg.WriteString("\r\n")
-
-	// Body
-	msg.WriteString(e.Body)
-
-	return msg.Bytes()
 }
 
 func readSpreadsheet(filepathStr string) ([][]string, error) {
@@ -230,7 +182,7 @@ func readSpreadsheet(filepathStr string) ([][]string, error) {
 			return nil, err
 		}
 		return records, nil
-	case ".xlsx":
+	default:
 		f, err := excelize.OpenFile(filepathStr)
 		if err != nil {
 			return nil, err
@@ -238,7 +190,7 @@ func readSpreadsheet(filepathStr string) ([][]string, error) {
 
 		sheets := f.GetSheetList()
 		if len(sheets) == 0 {
-			return nil, errors.New("no sheets found in XLSX")
+			return nil, fmt.Errorf("no sheets found in excel")
 		}
 
 		rows, err := f.GetRows(sheets[0])
@@ -246,18 +198,19 @@ func readSpreadsheet(filepathStr string) ([][]string, error) {
 			return nil, err
 		}
 		return rows, nil
-	default:
-		return nil, errors.New("unsupported file type")
 	}
 }
 
-func mapDataToAny(data [][]string) ([]map[string]any, error) {
+func mapDataToAny(data [][]string) ([]map[string]any, []string, error) {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("empty data")
+		return nil, nil, fmt.Errorf("empty data")
 	}
 
 	headers := data[0]
 	records := make([]map[string]any, 0, len(data)-1)
+	for i, s := range headers {
+		headers[i] = normalize(s)
+	}
 
 	for _, row := range data[1:] {
 		record := make(map[string]any)
@@ -271,17 +224,17 @@ func mapDataToAny(data [][]string) ([]map[string]any, error) {
 		records = append(records, record)
 	}
 
-	return records, nil
+	return records, headers, nil
 }
 
-func IsValidEmail(email string) bool {
+var reEmail = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+
+func isValidEmail(email string) bool {
 	// RFC 5322 simplified regex for general email validation
-	const emailRegex = `^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`
-	re := regexp.MustCompile(emailRegex)
-	return re.MatchString(email)
+	return reEmail.MatchString(email)
 }
 
-func parseEmails(emailsStr string) []string {
+func parseStringSlice(emailsStr string) []string {
 	val := strings.TrimSpace(emailsStr)
 	if val == "" {
 		return nil // no CC/BCC
@@ -297,4 +250,13 @@ func parseEmails(emailsStr string) []string {
 		}
 	}
 	return res
+}
+
+var reNormal = regexp.MustCompile(`[^a-zA-Z0-9]+`)
+
+func normalize(s string) string {
+	// s = strings.ToLower(s) maybe?
+	s = reNormal.ReplaceAllString(s, "_")
+	s = strings.Trim(s, "_")
+	return s
 }
