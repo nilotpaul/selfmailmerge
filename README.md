@@ -33,6 +33,7 @@ ATTACHMENT=
 ```
 
 - `CSV_FILE_PATH` → path to your CSV/XLSX file.
+- `ATTACHMENT` -> path to files (seperated by comma if multiple).
 - Use `{{.HeaderName}}` to inject values from your spreadsheet headers.
 - All spreadsheet data will be accessible from template.
 
