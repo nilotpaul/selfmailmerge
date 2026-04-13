@@ -3,21 +3,26 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/smtp"
-	"os"
 	"strings"
 
 	"github.com/domodwyer/mailyak/v3"
 )
 
+type Attachment interface {
+	io.Reader
+	Name() string
+}
+
 type Message struct {
-	From            string
-	To              []string
-	CC              []string // seperated by comma
-	BCC             []string // seperated by comma
-	Subject         string
-	Body            string   // HTML body
-	AttachmentPaths []string // file path seperated by comma
+	From        string
+	To          []string
+	CC          []string // seperated by comma
+	BCC         []string // seperated by comma
+	Subject     string   // plain text
+	Body        string   // HTML body
+	Attachments []Attachment
 }
 
 func (m Message) PrintDebug() {
@@ -28,12 +33,17 @@ func (m Message) PrintDebug() {
 	fmt.Printf("BCC: %s\n", strings.Join(m.BCC, ", "))
 	fmt.Printf("Subject: %s\n", m.Subject)
 	fmt.Printf("Body:\n%s\n", m.Body)
-	fmt.Printf("Attachments: %s\n", strings.Join(m.AttachmentPaths, ", "))
+
+	var attachmentNames []string
+	for _, at := range m.Attachments {
+		attachmentNames = append(attachmentNames, at.Name())
+	}
+	fmt.Printf("Attachments: %s\n", strings.Join(attachmentNames, ", "))
 	fmt.Println("-------------------------")
 }
 
 func NewMail(m *Message) (*mailyak.MailYak, error) {
-	mail := mailyak.New(SmtpHost+":"+SmtpPort, LoginAuth(m.From, password))
+	mail := mailyak.New(cfg.Host+":"+cfg.Port, LoginAuth(cfg.User, cfg.Password))
 
 	mail.To(m.To...)
 	mail.From(m.From)
@@ -48,15 +58,8 @@ func NewMail(m *Message) (*mailyak.MailYak, error) {
 	if len(m.BCC) > 0 {
 		mail.Bcc(m.BCC...)
 	}
-	if len(m.AttachmentPaths) > 0 {
-		for _, path := range m.AttachmentPaths {
-			f, err := os.Open(path)
-			if err != nil {
-				return nil, fmt.Errorf("attachment error: %v\n", err)
-			}
-
-			mail.Attach(path, f)
-		}
+	for _, at := range m.Attachments {
+		mail.Attach(at.Name(), at)
 	}
 
 	return mail, nil

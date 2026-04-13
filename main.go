@@ -4,81 +4,36 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
-	"errors"
-	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
-	"github.com/joho/godotenv"
 	"github.com/xuri/excelize/v2"
 )
 
-const (
-	SmtpHost = "smtp.office365.com"
-	SmtpPort = "587"
+var (
+	cfg *Config
+
+	templ        = template.New("")
+	templatePath = "template.html"
 )
 
-var templ = template.New("")
-var password string
-
 func main() {
-	godotenv.Load()
-	var (
-		isTest    = flag.Bool("test", false, "test mode")
-		from      = flag.String("from", "", "sender address")
-		pass      = flag.String("password", "", "microsoft account password")
-		templPath = flag.String("template", "template.html", "email template path")
-		csvPath   = flag.String("csv", "", "email template path")
-
-		attachment = os.Getenv("ATTACHMENT")
-		body       = os.Getenv("BODY")
-	)
-	flag.Parse()
-
-	if len(*from) == 0 {
-		*from = os.Getenv("FROM")
-	}
-	if len(*templPath) == 0 {
-		*templPath = os.Getenv("EMAIL_TEMPLATE_PATH")
-	}
-	if len(*csvPath) == 0 {
-		*csvPath = os.Getenv("CSV_FILE_PATH")
-	}
-	// validations
-	if len(*from) == 0 {
-		log.Fatal("no sender address provided")
-	}
-	if len(*pass) == 0 {
-		log.Fatal("no password provided")
-	}
-	if len(*templPath) == 0 && len(strings.TrimSpace(body)) == 0 {
-		log.Fatal("no email template provided")
-	}
-	if len(*csvPath) == 0 {
-		log.Fatal("no csv file path provided")
-	}
-	password = *pass
-
-	if len(*templPath) > 0 {
-		_, err := templ.ParseFiles(*templPath)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				log.Fatal(err)
-			}
-
-			_, err := templ.New(*templPath).Parse(body)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
+	var err error
+	cfg, err = NewConfig()
+	if err != nil {
+		log.Fatalf("config error: %+v", err)
 	}
 
-	recs, err := readSpreadsheet(*csvPath)
+	_, err = templ.New(templatePath).Parse(cfg.BodyContent)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	recs, err := readSpreadsheet(cfg.SpreadsheetPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -99,7 +54,7 @@ func main() {
 		buf := new(bytes.Buffer)
 		subBuf := new(bytes.Buffer)
 
-		err = templ.ExecuteTemplate(buf, *templPath, row)
+		err = templ.ExecuteTemplate(buf, templatePath, row)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -121,16 +76,24 @@ func main() {
 			}
 		}
 
-		cc := parseStringSlice(os.Getenv("CC"))
-		bcc := parseStringSlice(os.Getenv("BCC"))
+		attachments := make([]Attachment, len(cfg.AttachmentPaths))
+		for i, path := range cfg.AttachmentPaths {
+			f, err := os.Open(path)
+			if err != nil {
+				log.Fatalf("attachment error: %+v", err)
+			}
+			defer f.Close()
+
+			attachments[i] = f
+		}
 		emailsToBeSent = append(emailsToBeSent, &Message{
-			From:            *from,
-			To:              to,
-			Subject:         subBuf.String(),
-			Body:            strings.ReplaceAll(strings.TrimSpace(buf.String()), "\n", "<br/>"),
-			CC:              cc,
-			BCC:             bcc,
-			AttachmentPaths: parseStringSlice(attachment),
+			From:        cfg.From,
+			To:          to,
+			Subject:     subBuf.String(),
+			Body:        strings.ReplaceAll(strings.TrimSpace(buf.String()), "\n", "<br/>"),
+			CC:          parseStringSlice(os.Getenv("CC")),
+			BCC:         parseStringSlice(os.Getenv("BCC")),
+			Attachments: attachments,
 		})
 	}
 
@@ -141,7 +104,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		if *isTest {
+		if cfg.IsTest {
 			msg.PrintDebug()
 			return
 		} else {
@@ -155,12 +118,9 @@ func main() {
 	if len(errs) == 0 {
 		fmt.Printf("%d emails sent succesfully!", len(emailsToBeSent))
 	} else {
-		res := map[string]any{"count": len(errs), "failed": errs}
-		file, _ := os.Create("emails.json")
-		defer file.Close()
-		enc := json.NewEncoder(file)
-		enc.SetIndent("", "  ")
-		enc.Encode(res)
+		if err := writeErrorsToJson(errs); err != nil {
+			log.Println("WARN: failed to write errors in emails.json file")
+		}
 		fmt.Println("failed to send some/all emails, check emails.json file")
 	}
 }
@@ -187,6 +147,7 @@ func readSpreadsheet(filepathStr string) ([][]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		defer f.Close()
 
 		sheets := f.GetSheetList()
 		if len(sheets) == 0 {
@@ -199,6 +160,21 @@ func readSpreadsheet(filepathStr string) ([][]string, error) {
 		}
 		return rows, nil
 	}
+}
+
+func writeErrorsToJson(errs map[string]string) error {
+	file, err := os.Create("emails.json")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	enc := json.NewEncoder(file)
+	enc.SetIndent("", "  ")
+	return enc.Encode(map[string]any{
+		"count":  len(errs),
+		"failed": errs,
+	})
 }
 
 func mapDataToAny(data [][]string) ([]map[string]any, []string, error) {
@@ -225,38 +201,4 @@ func mapDataToAny(data [][]string) ([]map[string]any, []string, error) {
 	}
 
 	return records, headers, nil
-}
-
-var reEmail = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
-
-func isValidEmail(email string) bool {
-	// RFC 5322 simplified regex for general email validation
-	return reEmail.MatchString(email)
-}
-
-func parseStringSlice(emailsStr string) []string {
-	val := strings.TrimSpace(emailsStr)
-	if val == "" {
-		return nil // no CC/BCC
-	}
-
-	// Split by comma and trim spaces
-	parts := strings.Split(val, ",")
-	res := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			res = append(res, p)
-		}
-	}
-	return res
-}
-
-var reNormal = regexp.MustCompile(`[^a-zA-Z0-9]+`)
-
-func normalize(s string) string {
-	// s = strings.ToLower(s) maybe?
-	s = reNormal.ReplaceAllString(s, "_")
-	s = strings.Trim(s, "_")
-	return s
 }
